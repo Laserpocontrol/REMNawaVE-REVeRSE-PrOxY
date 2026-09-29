@@ -1,0 +1,123 @@
+---
+title: Внешний доступ к API
+description: Как настроить внешний доступ к API
+---
+
+## Модификация конфигурации Nginx для внешнего доступа к API
+
+Добавляем в `nginx.conf` в блок сервера с доменом панели `server_name panel.domen.com;`
+
+```
+location ^~ /api/ {
+    proxy_http_version 1.1;
+    proxy_pass http://remnawave;
+    proxy_set_header Host $host;
+    proxy_set_header Upgrade $http_upgrade;
+    proxy_set_header Connection $connection_upgrade;
+    proxy_set_header X-Real-IP $remote_addr;
+    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-Proto $scheme;
+    proxy_set_header X-Forwarded-Host $host;
+    proxy_set_header X-Forwarded-Port $server_port;
+    proxy_send_timeout 60s;
+    proxy_read_timeout 60s;
+}
+```
+ 
+Это открывает доступ к API из-вне, при этом API будут по прежнему защищены токеном авторизации.
+
+:::danger[Важно]
+В Remnawave 3.x переключателя `IS_DOCS_ENABLED` больше нет: документация API живёт за `/api/backend-tools` и закрыта кукой, подписанной `APP_SECRET`. Если не хотите отдавать её наружу — закройте этот путь на реверс-прокси
+:::
+
+
+## Получение доступа к API с использованием cookie
+
+### Получение cookie
+
+Открываем nginx.conf и ищем строку `map $http_cookie $auth_cookie`. Нам понадобиться значение после `*`, i.e. для
+
+```
+map $http_cookie $auth_cookie {
+default 0;
+"~*aEmFnBcC=WbYWpixX" 1;
+}
+```
+
+нашими cookie будут `aEmFnBcC=WbYWpixX`.
+
+### Отправка cookies в header'е
+
+На примере HTTP клиента `httpx` и записи `COOKIES` в `.env` файле вашего проекта рассмотрим отправку cookies в заголовке:
+
+```json
+COOKIES={"aEmFnBcC":"WbYWpixX"}
+```
+
+```python
+token = os.getenv("API_TOKEN", "")
+base_url = os.getenv("REMNAWAVE_BASE_URL", "")
+cookies = json.loads(os.getenv("COOKIES", "{}"))
+
+async def get_all_nodes():
+    headers = {
+        "Content-Type": "application/json",
+        "Authorization": "Bearer " + token
+    }
+
+    async with httpx.AsyncClient(cookies=cookies) as async_client:
+        response = await async_client.get(f"{base_url}/api/nodes", headers=headers)
+
+    return response.json()
+```
+
+## Доступ к API при включённой странице входа
+
+Если при установке панели выбрана не cookie-защита, а страница входа (TinyAuth для Nginx или caddy-with-auth для Caddy), API тоже закрыт. Данные для входа передаются в отдельном заголовке `X-Api-Key`, а `Authorization` с токеном панели доходит до API нетронутым — оба заголовка отправляются в одном запросе.
+
+### Страница входа (TinyAuth, Nginx)
+
+В `X-Api-Key` передаются данные для входа TinyAuth в формате `Basic base64(логин:пароль)`. Собрать пару:
+
+```bash
+printf '%s' 'логин:пароль' | base64
+# dXNlcm5hbWU6cGFzc3dvcmQ=
+```
+
+:::caution[Частая ошибка]
+Пишите именно `printf '%s' 'логин:пароль'` — с форматом первым аргументом. Без него команда `printf 'логин:пароль'` воспринимает строку как формат: символы `%` в пароле превращаются в спецификаторы, и на выходе получается мусорный base64.
+:::
+
+Итоговые заголовки запроса:
+
+```json
+{
+    "Authorization": "Bearer <токен панели>",
+    "X-Api-Key": "Basic dXNlcm5hbWU6cGFzc3dvcmQ="
+}
+```
+
+### Caddy с MFA (caddy-with-auth)
+
+Ключ создаётся на самой странице входа: `https://<домен панели>/r/settings/apikeys` (ссылка «API Keys»). Отправляется как есть, без обёртки Basic:
+
+```json
+{
+    "Authorization": "Bearer <токен панели>",
+    "X-Api-Key": "<ключ со страницы входа>"
+}
+```
+
+### Отдельная страница подписки
+
+Установка «только страница подписки» спрашивает способ защиты панели и подставляет всё сама: при TinyAuth достаточно ввести логин и пароль страницы входа — base64-пару инсталлер собирает самостоятельно.
+
+| Защита панели | Что спрашивает инсталлер | Переменная в compose сабки |
+|---|---|---|
+| Cookie-защита | кука `ИМЯ=ЗНАЧЕНИЕ` | `EGAMES_COOKIE=ИМЯ=ЗНАЧЕНИЕ` |
+| Страница входа (TinyAuth) | логин и пароль | `CADDY_AUTH_API_TOKEN=Basic base64(...)` |
+| Caddy с MFA | ключ со страницы входа | `CADDY_AUTH_API_TOKEN=<ключ>` |
+
+:::note[Важно]
+Ключи и данные для входа в `X-Api-Key` — это доступ к панели: при смене пароля страницы входа или переустановке панели не забудьте обновить их у всех клиентов, включая compose страницы подписки.
+:::

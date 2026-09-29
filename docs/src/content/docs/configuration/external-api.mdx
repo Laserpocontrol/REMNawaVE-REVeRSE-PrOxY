@@ -1,0 +1,122 @@
+---
+title: External access to API
+description: How to configure external access to the API
+---
+
+## Modifying Nginx Configuration for External API Access
+
+Add the following to `nginx.conf` in the server block for the panel domain `server_name panel.domen.com;`
+
+```
+location ^~ /api/ {
+    proxy_http_version 1.1;
+    proxy_pass http://remnawave;
+    proxy_set_header Host $host;
+    proxy_set_header Upgrade $http_upgrade;
+    proxy_set_header Connection $connection_upgrade;
+    proxy_set_header X-Real-IP $remote_addr;
+    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-Proto $scheme;
+    proxy_set_header X-Forwarded-Host $host;
+    proxy_set_header X-Forwarded-Port $server_port;
+    proxy_send_timeout 60s;
+    proxy_read_timeout 60s;
+}
+```
+
+This opens access to the API from the outside, while the API will still be protected by an authorization token.
+
+:::danger
+Remnawave 3.x no longer has an `IS_DOCS_ENABLED` switch: the API docs live behind `/api/backend-tools`, which the panel gates with a cookie signed by `APP_SECRET`. Keep that path closed on your reverse proxy if you do not want it reachable from outside.
+:::
+
+## Accessing API through cookies
+
+### Acquiring cookie
+
+Open nginx.conf and search for `map $http_cookie $auth_cookie`. We'll need the values that go after `*`, i.e. for
+
+```
+map $http_cookie $auth_cookie {
+default 0;
+"~*aEmFnBcC=WbYWpixX" 1;
+}
+```
+
+our cookies will be `aEmFnBcC=WbYWpixX`.
+
+### Sending the cookies in header
+
+Using the HTTP client `httpx` and the `COOKIES` entry in your project's `.env` file as an example, let's look at sending cookies in the header:
+
+```json
+COOKIES={"aEmFnBcC":"WbYWpixX"}
+```
+
+```python
+token = os.getenv("API_TOKEN", "")
+base_url = os.getenv("REMNAWAVE_BASE_URL", "")
+cookies = json.loads(os.getenv("COOKIES", "{}"))
+
+async def get_all_nodes():
+    headers = {
+        "Content-Type": "application/json",
+        "Authorization": "Bearer " + token
+    }
+
+    async with httpx.AsyncClient(cookies=cookies) as async_client:
+        response = await async_client.get(f"{base_url}/api/nodes", headers=headers)
+
+    return response.json()
+```
+
+## Accessing the API when a login page is enabled
+
+If the panel was installed with a login page instead of the cookie gate (TinyAuth for Nginx, or the caddy-with-auth portal for Caddy), the API is gated too. Login-page credentials go in the separate `X-Api-Key` header, while `Authorization` with your panel token passes through untouched — both headers travel in the same request.
+
+### Login page (TinyAuth, Nginx)
+
+The `X-Api-Key` carries the TinyAuth credentials as `Basic base64(username:password)`. Build the pair with:
+
+```bash
+printf '%s' 'username:password' | base64
+# dXNlcm5hbWU6cGFzc3dvcmQ=
+```
+
+:::caution
+Keep the `'%s'` format as the first argument. A bare `printf 'username:password'` treats the string as a format: any `%` in the password becomes a format specifier and the resulting base64 is garbage.
+:::
+
+Resulting request headers:
+
+```json
+{
+    "Authorization": "Bearer <panel token>",
+    "X-Api-Key": "Basic dXNlcm5hbWU6cGFzc3dvcmQ="
+}
+```
+
+### Caddy with MFA (caddy-with-auth)
+
+The key is issued by the portal itself at `https://<panel domain>/r/settings/apikeys` (the "API Keys" link). Send it as is, without the Basic wrapper:
+
+```json
+{
+    "Authorization": "Bearer <panel token>",
+    "X-Api-Key": "<portal-issued key>"
+}
+```
+
+### Standalone subscription page
+
+The "subscription page only" install asks how the panel is protected and fills everything in for you: with TinyAuth you just enter the login page username and password — the installer assembles the base64 pair itself.
+
+| Panel protection | What the installer asks | Variable in the sub page compose |
+|---|---|---|
+| Cookie gate | the `NAME=VALUE` cookie | `EGAMES_COOKIE=NAME=VALUE` |
+| Login page (TinyAuth) | username and password | `CADDY_AUTH_API_TOKEN=Basic base64(...)` |
+| Caddy with MFA | the login page API key | `CADDY_AUTH_API_TOKEN=<key>` |
+
+:::note
+Whatever goes into `X-Api-Key` is panel access: when the portal password changes or the panel is reinstalled, remember to update it everywhere it is used — including the subscription page compose.
+:::

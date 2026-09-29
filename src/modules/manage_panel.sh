@@ -1,0 +1,1044 @@
+#!/bin/bash
+# Module: Manage Panel
+
+# What runs on this box, at a glance: one line per installed component,
+# nothing for what is absent — the rule the extensions hub follows. A
+# single docker ps snapshot feeds every state check, no docker call per
+# line; the flavor in parentheses tells nginx and caddy installs apart.
+show_component_status() {
+    local containers
+    containers=$(docker ps --format '{{.Names}}' 2>/dev/null)
+
+    if panel_is_installed; then
+        local flavor=""
+        if grep -qE '^[[:space:]]*remnawave-nginx:' /opt/remnawave/docker-compose.yml; then
+            flavor=" (nginx)"
+        elif grep -qE '^[[:space:]]*remnawave-caddy:' /opt/remnawave/docker-compose.yml; then
+            flavor=" (caddy)"
+        fi
+        if echo "$containers" | grep -qx remnawave; then
+            echo -e " ${LANG[COMP_PANEL]}$flavor: ${COLOR_GREEN}${LANG[COMP_STATE_RUNNING]}${COLOR_RESET}"
+        else
+            echo -e " ${LANG[COMP_PANEL]}$flavor: ${COLOR_RED}${LANG[COMP_STATE_STOPPED]}${COLOR_RESET}"
+        fi
+
+        # The login page is part of the panel stack, so it shows only when
+        # the panel was installed with it.
+        if grep -qE '^[[:space:]]*tinyauth:' /opt/remnawave/docker-compose.yml; then
+            if echo "$containers" | grep -qx tinyauth; then
+                echo -e " ${LANG[COMP_TINYAUTH]}: ${COLOR_GREEN}${LANG[COMP_STATE_RUNNING]}${COLOR_RESET}"
+            else
+                echo -e " ${LANG[COMP_TINYAUTH]}: ${COLOR_RED}${LANG[COMP_STATE_STOPPED]}${COLOR_RESET}"
+            fi
+        fi
+    fi
+
+    # The subscription page lives wherever its installer put it: a service
+    # inside the panel compose (panel and panel+node layouts) or its own
+    # /opt/subscription stack (standalone install).
+    if [ -f /opt/subscription/docker-compose.yml ] \
+        || { [ -f /opt/remnawave/docker-compose.yml ] && grep -qE '^[[:space:]]*remnawave-subscription-page:' /opt/remnawave/docker-compose.yml; }; then
+        if echo "$containers" | grep -qx remnawave-subscription-page; then
+            echo -e " ${LANG[COMP_SUB_PAGE]}: ${COLOR_GREEN}${LANG[COMP_STATE_RUNNING]}${COLOR_RESET}"
+        else
+            echo -e " ${LANG[COMP_SUB_PAGE]}: ${COLOR_RED}${LANG[COMP_STATE_STOPPED]}${COLOR_RESET}"
+        fi
+    fi
+
+    if { [ -f /opt/remnanode/docker-compose.yml ] && grep -q "^[[:space:]]*remnanode:" /opt/remnanode/docker-compose.yml; } || \
+       { [ -f /opt/remnawave/docker-compose.yml ] && grep -q "^[[:space:]]*remnanode:" /opt/remnawave/docker-compose.yml; }; then
+        if echo "$containers" | grep -qx remnanode; then
+            echo -e " ${LANG[COMP_NODE]}: ${COLOR_GREEN}${LANG[COMP_STATE_RUNNING]}${COLOR_RESET}"
+        else
+            echo -e " ${LANG[COMP_NODE]}: ${COLOR_RED}${LANG[COMP_STATE_STOPPED]}${COLOR_RESET}"
+        fi
+    fi
+}
+
+show_manage_panel_menu() {
+    echo -e ""
+    echo -e "${COLOR_GREEN}${LANG[MENU_3]}${COLOR_RESET}"
+    echo -e ""
+    local status_block
+    status_block=$(show_component_status)
+    if [ -n "$status_block" ]; then
+        echo -e "$status_block"
+        echo -e ""
+    fi
+    show_panel_upgrade_notice nohint
+    echo -e "${COLOR_YELLOW}1. ${LANG[START_PANEL_NODE]}${COLOR_RESET}"
+    echo -e "${COLOR_YELLOW}2. ${LANG[STOP_PANEL_NODE]}${COLOR_RESET}"
+    echo -e "${COLOR_YELLOW}3. ${LANG[UPDATE_PANEL_NODE]}${COLOR_RESET}"
+    echo -e "${COLOR_YELLOW}4. ${LANG[VIEW_LOGS]}${COLOR_RESET}"
+    echo -e "${COLOR_YELLOW}5. ${LANG[REMNAWAVE_CLI]}${COLOR_RESET}"
+
+    # The extra entries act on their own layout, so any other box never
+    # sees them: the 8443 access exists only where Xray owns 443 and the
+    # panel hides behind the selfsteal flow (panel + node), the two panel
+    # entries need a panel. The numbering closes over the gaps.
+    local last=5
+    local opt_access="__none__"
+    local opt_upgrade="__none__"
+    local opt_minclientver="__none__"
+
+    if [ -f /opt/remnawave/docker-compose.yml ] && grep -q "^[[:space:]]*remnanode:" /opt/remnawave/docker-compose.yml; then
+        last=$((last + 1))
+        opt_access=$last
+        echo -e "${COLOR_YELLOW}${last}. ${LANG[ACCESS_PANEL]}${COLOR_RESET}"
+    fi
+
+    if panel_is_installed; then
+        if panel_needs_v3_migration; then
+            last=$((last + 1))
+            opt_upgrade=$last
+            echo -e "${COLOR_YELLOW}${last}. ${LANG[UPGRADE_PANEL_V3]}${COLOR_RESET}"
+        fi
+
+        last=$((last + 1))
+        opt_minclientver=$last
+        echo -e "${COLOR_YELLOW}${last}. ${LANG[MINCLIENTVER_MENU]}${COLOR_RESET}"
+    fi
+
+    echo -e ""
+    echo -e "${COLOR_YELLOW}0. ${LANG[EXIT]}${COLOR_RESET}"
+    echo -e ""
+    reading "$(printf "${LANG[MANAGE_PANEL_NODE_PROMPT]}" "$last")" SUB_OPTION
+
+    case $SUB_OPTION in
+        1)
+            start_panel_node
+            sleep 2
+            show_manage_panel_menu
+            ;;
+        2)
+            stop_panel_node
+            sleep 2
+            show_manage_panel_menu
+            ;;
+        3)
+            update_panel_node
+            sleep 2
+            show_manage_panel_menu
+            ;;
+        4)
+            view_logs
+            sleep 2
+            show_manage_panel_menu
+            ;;
+        5)
+            run_remnawave_cli
+            sleep 2
+            show_manage_panel_menu
+            ;;
+        "$opt_access")
+            manage_panel_access
+            sleep 2
+            show_manage_panel_menu
+            ;;
+        "$opt_upgrade")
+            upgrade_panel_to_v3
+            sleep 2
+            show_manage_panel_menu
+            ;;
+        "$opt_minclientver")
+            set_reality_min_client_ver
+            sleep 2
+            show_manage_panel_menu
+            ;;
+        0)
+            remnawave_reverse
+            ;;
+        *)
+            printf "${COLOR_YELLOW}${LANG[MANAGE_PANEL_NODE_INVALID_CHOICE]}${COLOR_RESET}\n" "$last"
+            sleep 1
+            show_manage_panel_menu
+            ;;
+    esac
+}
+
+run_remnawave_cli() {
+    if ! docker ps --format '{{.Names}}' | grep -q '^remnawave$'; then
+        echo -e "${COLOR_YELLOW}${LANG[CONTAINER_NOT_RUNNING]}${COLOR_RESET}"
+        return 1
+    fi
+
+    exec 3>&1 4>&2
+    exec > /dev/tty 2>&1
+
+    echo -e "${COLOR_YELLOW}${LANG[RUNNING_CLI]}${COLOR_RESET}"
+    local cli_bin="remnawave"
+    if docker exec remnawave sh -c 'command -v cli' > /dev/null 2>&1; then
+        cli_bin="cli"
+    fi
+    if docker exec -it -e TERM=xterm-256color remnawave "$cli_bin"; then
+        echo -e "${COLOR_GREEN}${LANG[CLI_SUCCESS]}${COLOR_RESET}"
+    else
+        echo -e "${COLOR_RED}${LANG[CLI_FAILED]}${COLOR_RESET}"
+        exec 1>&3 2>&4
+        return 1
+    fi
+
+    exec 1>&3 2>&4
+}
+
+managed_compose_dirs() {
+    local dir
+    for dir in /opt/remnawave /opt/remnanode /opt/subscription; do
+        [ -d "$dir" ] && echo "$dir"
+    done
+}
+
+compose_stack_running() {
+    docker compose ps --status running --quiet 2>/dev/null | grep -q .
+}
+
+# Silenced compose call under a spinner with an honest exit code. Defined
+# guardedly so several modules can carry the same definition.
+command -v compose_run_spinner >/dev/null 2>&1 || compose_run_spinner() {
+    local desc="$1"; shift
+    local rc_file
+    rc_file=$(mktemp)
+    ( "$@" > /dev/null 2>&1; echo $? > "$rc_file" ) &
+    spinner $! "$desc"
+    local rc
+    rc=$(cat "$rc_file" 2>/dev/null)
+    rm -f "$rc_file"
+    return "${rc:-1}"
+}
+
+start_panel_node() {
+    local dir any=0
+    while IFS= read -r dir; do
+        [ -n "$dir" ] || continue
+        any=1
+        cd "$dir" 2>/dev/null || { echo -e "${COLOR_RED}${LANG[CHANGE_DIR_FAILED]} $dir${COLOR_RESET}" >&2; continue; }
+
+        if compose_stack_running; then
+            echo -e "${COLOR_GREEN}${LANG[PANEL_RUNNING]} ($dir)${COLOR_RESET}"
+        else
+            echo -e "${COLOR_YELLOW}${LANG[STACK_STARTING]} ($dir)...${COLOR_RESET}"
+            sleep 1
+            if compose_run_spinner "${LANG[WAITING]}" docker compose up -d; then
+                echo -e "${COLOR_GREEN}${LANG[PANEL_RUN]} ($dir)${COLOR_RESET}"
+            else
+                echo -e "${COLOR_RED}$(printf "${LANG[COMPOSE_UP_FAIL]}" "$dir" "$dir")${COLOR_RESET}"
+            fi
+        fi
+    done < <(managed_compose_dirs)
+
+    [ "$any" -eq 1 ] || { echo -e "${COLOR_RED}${LANG[DIR_NOT_FOUND]}${COLOR_RESET}"; exit 1; }
+}
+
+stop_panel_node() {
+    local dir any=0
+    while IFS= read -r dir; do
+        [ -n "$dir" ] || continue
+        any=1
+        cd "$dir" 2>/dev/null || { echo -e "${COLOR_RED}${LANG[CHANGE_DIR_FAILED]} $dir${COLOR_RESET}" >&2; continue; }
+
+        if ! compose_stack_running; then
+            echo -e "${COLOR_GREEN}${LANG[PANEL_STOPPED]} ($dir)${COLOR_RESET}"
+        else
+            echo -e "${COLOR_YELLOW}${LANG[STACK_STOPPING]} ($dir)...${COLOR_RESET}"
+            sleep 1
+            if compose_run_spinner "${LANG[WAITING]}" docker compose down; then
+                echo -e "${COLOR_GREEN}${LANG[PANEL_STOP]} ($dir)${COLOR_RESET}"
+            else
+                echo -e "${COLOR_RED}$(printf "${LANG[COMPOSE_DOWN_FAIL]}" "$dir")${COLOR_RESET}"
+            fi
+        fi
+    done < <(managed_compose_dirs)
+
+    [ "$any" -eq 1 ] || { echo -e "${COLOR_RED}${LANG[DIR_NOT_FOUND]}${COLOR_RESET}"; exit 1; }
+}
+
+update_panel_node() {
+    local dir any=0
+    while IFS= read -r dir; do
+        [ -n "$dir" ] || continue
+        any=1
+        cd "$dir" 2>/dev/null || { echo -e "${COLOR_RED}${LANG[CHANGE_DIR_FAILED]} $dir${COLOR_RESET}" >&2; continue; }
+
+        echo -e "${COLOR_YELLOW}${LANG[UPDATING]} ($dir)${COLOR_RESET}"
+        sleep 1
+
+        if [ "$dir" = "/opt/remnawave" ] && panel_needs_v3_migration "$dir"; then
+            echo -e "${COLOR_YELLOW}${LANG[UPGRADE_REQUIRED_V3]}${COLOR_RESET}"
+            continue
+        fi
+
+        images_before=$(docker compose config --images | sort -u)
+        if [ -n "$images_before" ]; then
+            before=$(echo "$images_before" | xargs -I {} docker images -q {} | sort -u)
+        else
+            before=""
+        fi
+
+        tmpfile=$(mktemp)
+        docker compose pull > "$tmpfile" 2>&1 &
+        spinner $! "${LANG[WAITING]}"
+        pull_output=$(cat "$tmpfile")
+        rm -f "$tmpfile"
+
+        images_after=$(docker compose config --images | sort -u)
+        if [ -n "$images_after" ]; then
+            after=$(echo "$images_after" | xargs -I {} docker images -q {} | sort -u)
+        else
+            after=""
+        fi
+
+        if [ "$before" != "$after" ] || echo "$pull_output" | grep -q "Pull complete"; then
+            echo -e ""
+            echo -e "${COLOR_YELLOW}${LANG[IMAGES_DETECTED]} ($dir)${COLOR_RESET}"
+            # A failed `up` here leaves the whole panel DOWN behind a green
+            # success line — the rc gate is the difference between an honest
+            # error and a silent outage.
+            if ! compose_run_spinner "${LANG[WAITING]}" docker compose down; then
+                echo -e "${COLOR_RED}$(printf "${LANG[COMPOSE_DOWN_FAIL]}" "$dir")${COLOR_RESET}"
+                continue
+            fi
+            sleep 5
+            if ! compose_run_spinner "${LANG[WAITING]}" docker compose up -d; then
+                echo -e "${COLOR_RED}$(printf "${LANG[COMPOSE_UP_FAIL]}" "$dir" "$dir")${COLOR_RESET}"
+                continue
+            fi
+            sleep 1
+            docker image prune -f > /dev/null 2>&1
+            echo -e "${COLOR_GREEN}${LANG[UPDATE_SUCCESS1]} ($dir)${COLOR_RESET}"
+        else
+            echo -e "${COLOR_YELLOW}${LANG[NO_UPDATE]} ($dir)${COLOR_RESET}"
+        fi
+    done < <(managed_compose_dirs)
+
+    [ "$any" -eq 1 ] || { echo -e "${COLOR_RED}${LANG[DIR_NOT_FOUND]}${COLOR_RESET}"; exit 1; }
+}
+
+# Read a single key from an .env-style file without sourcing it.
+read_env_value() {
+    local file="$1"
+    local key="$2"
+    [ -f "$file" ] || return 1
+    sed -n "s/^${key}=//p" "$file" | head -n 1 | sed -e 's/^"//' -e 's/"$//'
+}
+
+# The first 3.x boot runs prisma migrations and seeders before the app listens,
+# so a short health deadline is really a migration deadline: interrupting it can
+# leave a failed row in _prisma_migrations that blocks every later deploy.
+# Wait generously, and fail fast only on the two states that mean "it is dead":
+# the container exited, or restart: always is looping it.
+wait_for_container_health() {
+    local name="$1"
+    local timeout="${2:-300}"
+    local waited=0
+    local state=""
+    local health=""
+    local restarts=""
+
+    while [ "$waited" -lt "$timeout" ]; do
+        state=$(docker inspect --format '{{.State.Status}}' "$name" 2>/dev/null)
+        case "$state" in
+            exited|dead)
+                return 1
+                ;;
+        esac
+
+        restarts=$(docker inspect --format '{{.RestartCount}}' "$name" 2>/dev/null)
+        if [ -n "$restarts" ] && [ "$restarts" -gt 2 ] 2>/dev/null; then
+            return 1
+        fi
+
+        health=$(docker inspect --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}' "$name" 2>/dev/null)
+        if [ "$health" = "healthy" ]; then
+            return 0
+        fi
+        if [ "$health" = "none" ] && [ "$state" = "running" ]; then
+            return 0
+        fi
+
+        sleep 5
+        waited=$((waited + 5))
+    done
+
+    return 1
+}
+
+# Move an installed panel from the 2.x line to 3.x.
+upgrade_panel_to_v3() {
+    local dir="/opt/remnawave"
+
+    if [ ! -f "$dir/docker-compose.yml" ] || [ ! -f "$dir/.env" ]; then
+        echo -e "${COLOR_RED}${LANG[UPGRADE_NOT_A_PANEL]}${COLOR_RESET}"
+        return 1
+    fi
+
+    cd "$dir" || { echo -e "${COLOR_RED}${LANG[CHANGE_DIR_FAILED]} $dir${COLOR_RESET}"; return 1; }
+
+    local current_tag
+    current_tag=$(sed -n 's|^[[:space:]]*image:[[:space:]]*remnawave/backend:\([^[:space:]]*\).*|\1|p' docker-compose.yml | head -n 1)
+    if [ -z "$current_tag" ]; then
+        echo -e "${COLOR_RED}${LANG[UPGRADE_NOT_A_PANEL]}${COLOR_RESET}"
+        return 1
+    fi
+
+    if ! panel_needs_v3_migration "$dir"; then
+        printf "${COLOR_GREEN}${LANG[UPGRADE_ALREADY_V3]}${COLOR_RESET}\n" "$current_tag"
+        return 0
+    fi
+
+    # 3.x reads one APP_SECRET where 2.x accepted JWT_AUTH_SECRET as a deprecated
+    # alias for the same value. It signs sessions and API tokens and is mixed into
+    # every admin password hash, so it has to be carried over, never regenerated.
+    # A box that already carries APP_SECRET (added by hand, or by a previous run
+    # that stopped before the tag moved) keeps the value it has.
+    local app_secret
+    app_secret=$(read_env_value .env APP_SECRET)
+    if [ -z "$app_secret" ]; then
+        app_secret=$(read_env_value .env JWT_AUTH_SECRET)
+    fi
+    if [ -z "$app_secret" ]; then
+        echo -e "${COLOR_RED}${LANG[UPGRADE_NO_SECRET]}${COLOR_RESET}"
+        return 1
+    fi
+
+    echo -e ""
+    echo -e "${COLOR_RED}${LANG[WARNING_LABEL]}${COLOR_RESET}"
+    echo -e "${COLOR_YELLOW}${LANG[UPGRADE_WARNING]}${COLOR_RESET}"
+    echo -e ""
+    reading "${LANG[UPGRADE_CONFIRM_PROMPT]}" upgrade_confirm
+    if [ "$upgrade_confirm" != "upgrade" ]; then
+        echo -e "${COLOR_YELLOW}${LANG[UPGRADE_CANCELLED]}${COLOR_RESET}"
+        return 1
+    fi
+
+    local ts backup_dir pg_user pg_db
+    ts=$(date +%Y%m%d-%H%M%S)
+    backup_dir="$dir/backup/$ts"
+    if ! mkdir -p "$backup_dir"; then
+        echo -e "${COLOR_RED}${LANG[UPGRADE_BACKUP_FAILED]}${COLOR_RESET}"
+        return 1
+    fi
+
+    pg_user=$(read_env_value .env POSTGRES_USER)
+    pg_user="${pg_user:-postgres}"
+    pg_db=$(read_env_value .env POSTGRES_DB)
+    pg_db="${pg_db:-postgres}"
+
+    cp -a .env docker-compose.yml "$backup_dir/"
+    [ -f nginx.conf ] && cp -a nginx.conf "$backup_dir/"
+    [ -f Caddyfile ] && cp -a Caddyfile "$backup_dir/"
+    docker compose images > "$backup_dir/images-before.txt" 2>&1
+
+    echo -e "${COLOR_YELLOW}${LANG[UPGRADE_BACKUP]}${COLOR_RESET}"
+    docker compose up -d remnawave-db > /dev/null 2>&1
+    if ! wait_for_container_health remnawave-db 120; then
+        echo -e "${COLOR_RED}${LANG[UPGRADE_BACKUP_FAILED]}${COLOR_RESET}"
+        return 1
+    fi
+    # The 3.x migration chain rewrites tables, so it needs room for a second copy
+    # of the data, and the dump below lands on disk too. Running out midway leaves
+    # prisma with a failed migration row that blocks every later start, panel and
+    # rollback alike.
+    local db_bytes need_kb free_kb docker_root
+    db_bytes=$(docker compose exec -T remnawave-db psql -U "$pg_user" -d "$pg_db" -tAc "SELECT pg_database_size('$pg_db')" 2>/dev/null | tr -dc '0-9')
+    [ -n "$db_bytes" ] || db_bytes=0
+    need_kb=$(( db_bytes / 1024 * 3 + 524288 ))
+    docker_root=$(docker info --format '{{.DockerRootDir}}' 2>/dev/null)
+    for fs in "$dir" "${docker_root:-$dir}"; do
+        free_kb=$(df -Pk "$fs" 2>/dev/null | awk 'NR==2 {print $4}')
+        [ -n "$free_kb" ] || continue
+        if [ "$free_kb" -lt "$need_kb" ] 2>/dev/null; then
+            printf "${COLOR_RED}${LANG[UPGRADE_NO_DISK_SPACE]}${COLOR_RESET}\n" \
+                "$fs" "$((free_kb / 1024))" "$((need_kb / 1024))"
+            return 1
+        fi
+    done
+
+    if ! docker compose exec -T remnawave-db pg_dump -U "$pg_user" -d "$pg_db" -Fc --no-owner --no-privileges > "$backup_dir/remnawave-db.dump" 2> "$backup_dir/pg_dump.log"; then
+        echo -e "${COLOR_RED}${LANG[UPGRADE_BACKUP_FAILED]}${COLOR_RESET}"
+        cat "$backup_dir/pg_dump.log"
+        return 1
+    fi
+    if [ ! -s "$backup_dir/remnawave-db.dump" ]; then
+        echo -e "${COLOR_RED}${LANG[UPGRADE_BACKUP_FAILED]}${COLOR_RESET}"
+        return 1
+    fi
+    printf "${COLOR_GREEN}${LANG[UPGRADE_BACKUP_OK]}${COLOR_RESET}\n" "$backup_dir"
+
+    # Append only: the 2.x keys stay in place so the backed-up .env is a working
+    # rollback, and 3.x silently ignores keys it does not know.
+    if ! grep -q '^APP_SECRET=' .env; then
+        {
+            printf '\n### SECRETS ###\n'
+            printf '# 3.x dropped the JWT_AUTH_SECRET alias. The value below is the same one\n'
+            printf '# the panel already used, so admin logins and API tokens keep working.\n'
+            printf 'APP_SECRET=%s\n' "$app_secret"
+        } >> .env
+    fi
+    if ! grep -q '^PANEL_DOMAIN=' .env; then
+        local front_end
+        front_end=$(read_env_value .env FRONT_END_DOMAIN)
+        if [ -n "$front_end" ] && [ "$front_end" != "*" ]; then
+            printf 'PANEL_DOMAIN=%s\n' "$front_end" >> .env
+        fi
+    fi
+
+    # :latest and :dev already resolve to a 3.x image, so only the pinned old
+    # majors need the tag rewritten.
+    case "$current_tag" in
+        1|1.*|2|2.*)
+            sed -i "s|image: remnawave/backend:${current_tag}|image: remnawave/backend:3|" docker-compose.yml
+            if ! grep -qE '^[[:space:]]*image:[[:space:]]*remnawave/backend:3[[:space:]]*$' docker-compose.yml; then
+                printf "${COLOR_RED}${LANG[UPGRADE_TAG_FAILED]}${COLOR_RESET}\n" "$backup_dir"
+                return 1
+            fi
+            ;;
+    esac
+
+    echo -e "${COLOR_YELLOW}${LANG[UPGRADE_PULLING]}${COLOR_RESET}"
+    if ! docker compose pull remnawave > "$backup_dir/pull.log" 2>&1; then
+        # Nothing has been recreated yet, so put the compose file back rather
+        # than leaving a :3 tag for the next unrelated "up" to apply.
+        cp -a "$backup_dir/docker-compose.yml" ./docker-compose.yml
+        printf "${COLOR_RED}${LANG[UPGRADE_PULL_FAILED]}${COLOR_RESET}\n" "$backup_dir"
+        tail -n 10 "$backup_dir/pull.log"
+        return 1
+    fi
+
+    # --no-deps keeps compose from walking the service_healthy dependencies of
+    # the node and the subscription page while the first 3.x boot is still
+    # migrating: it would declare the backend unhealthy after ~2 minutes and
+    # abort, leaving both of them stopped.
+    echo -e "${COLOR_YELLOW}${LANG[UPGRADE_STARTING]}${COLOR_RESET}"
+    if ! docker compose up -d --no-deps --force-recreate remnawave > "$backup_dir/up.log" 2>&1; then
+        printf "${COLOR_RED}${LANG[UPGRADE_FAILED]}${COLOR_RESET}\n"
+        tail -n 20 "$backup_dir/up.log"
+        rollback_panel_from_v3 "$backup_dir" "$pg_user" "$pg_db"
+        return 1
+    fi
+
+    if ! wait_for_container_health remnawave 1800; then
+        echo -e "${COLOR_RED}${LANG[UPGRADE_FAILED]}${COLOR_RESET}"
+        docker compose logs --tail 60 remnawave
+        rollback_panel_from_v3 "$backup_dir" "$pg_user" "$pg_db"
+        return 1
+    fi
+
+    # Bring back whatever the recreate left behind: the subscription page and,
+    # on a combined box, the node.
+    docker compose up -d > "$backup_dir/up-rest.log" 2>&1
+
+    local stopped
+    stopped=$(docker compose ps --services --filter status=stopped 2>/dev/null | tr '\n' ' ')
+    if [ -n "${stopped// /}" ]; then
+        printf "${COLOR_RED}${LANG[UPGRADE_SERVICES_DOWN]}${COLOR_RESET}\n" "$stopped"
+        tail -n 20 "$backup_dir/up-rest.log"
+    fi
+
+    local new_version
+    new_version=$(docker exec remnawave cat /opt/app/package.json 2>/dev/null | jq -r '.version // empty' 2>/dev/null)
+    printf "${COLOR_GREEN}${LANG[UPGRADE_SUCCESS]}${COLOR_RESET}\n" "${new_version:-3.x}"
+    printf "${COLOR_YELLOW}${LANG[UPGRADE_NEXT_STEPS]}${COLOR_RESET}\n" "$backup_dir"
+}
+
+rollback_panel_from_v3() {
+    local backup_dir="$1"
+    local pg_user="$2"
+    local pg_db="$3"
+    local dir="/opt/remnawave"
+
+    echo -e "${COLOR_YELLOW}${LANG[ROLLBACK_START]}${COLOR_RESET}"
+    cd "$dir" || return 1
+
+    docker compose down > "$backup_dir/rollback-down.log" 2>&1
+    cp -a "$backup_dir/docker-compose.yml" "$backup_dir/.env" "$dir/"
+
+    # The 3.x migrations are one-way. Putting 2.x code back on a migrated schema
+    # is not a rollback, so restoring the dump is the default and declining it
+    # leaves the stack down rather than half-restored.
+    local restore_db=""
+    reading "${LANG[ROLLBACK_DB_PROMPT]}" restore_db
+    if [[ "$restore_db" =~ ^[nN] ]]; then
+        printf "${COLOR_RED}${LANG[ROLLBACK_DB_SKIPPED]}${COLOR_RESET}\n" "$backup_dir"
+        return 1
+    fi
+
+    docker compose up -d remnawave-db > /dev/null 2>&1
+    if ! wait_for_container_health remnawave-db 120; then
+        printf "${COLOR_RED}${LANG[ROLLBACK_FAILED]}${COLOR_RESET}\n" "$backup_dir"
+        return 1
+    fi
+
+    # 3.x creates tables and types 2.x never knew about; dropping the schema is
+    # the only way --clean cannot leave them behind.
+    if ! docker compose exec -T remnawave-db psql -U "$pg_user" -d "$pg_db" -v ON_ERROR_STOP=1 -c 'DROP SCHEMA public CASCADE; CREATE SCHEMA public;' > "$backup_dir/rollback-schema.log" 2>&1; then
+        printf "${COLOR_RED}${LANG[ROLLBACK_FAILED]}${COLOR_RESET}\n" "$backup_dir"
+        tail -n 20 "$backup_dir/rollback-schema.log"
+        return 1
+    fi
+    if ! docker compose exec -T remnawave-db pg_restore -U "$pg_user" -d "$pg_db" --no-owner --no-privileges --exit-on-error < "$backup_dir/remnawave-db.dump" > "$backup_dir/pg_restore.log" 2>&1; then
+        printf "${COLOR_RED}${LANG[ROLLBACK_FAILED]}${COLOR_RESET}\n" "$backup_dir"
+        tail -n 20 "$backup_dir/pg_restore.log"
+        return 1
+    fi
+
+    docker compose up -d > "$backup_dir/rollback-up.log" 2>&1
+    if wait_for_container_health remnawave 300; then
+        printf "${COLOR_GREEN}${LANG[ROLLBACK_DONE]}${COLOR_RESET}\n" "$backup_dir"
+    else
+        printf "${COLOR_RED}${LANG[ROLLBACK_FAILED]}${COLOR_RESET}\n" "$backup_dir"
+    fi
+}
+
+# Write realitySettings.minClientVer = 0.0.0 into REALITY inbounds that do not
+# define it. Xray-core >= 26.7.11 otherwise applies a default floor of 26.3.27
+# and refuses any client below it, which covers mihomo, sing-box and older Happ.
+# Note this lowers a floor rather than repairing anything: an operator who wants
+# the floor should leave it alone, or set a version of their own.
+set_reality_min_client_ver() {
+    local domain_url="127.0.0.1:3000"
+
+    echo -e "${COLOR_YELLOW}${LANG[MINCLIENTVER_EXPLAIN]}${COLOR_RESET}"
+    echo -e ""
+
+    if ! declare -F make_api_request > /dev/null 2>&1; then
+        load_api_module || return 1
+    fi
+
+    if ! docker ps --format '{{.Names}}' | grep -q '^remnawave$'; then
+        echo -e "${COLOR_RED}${LANG[CONTAINER_NOT_RUNNING]}${COLOR_RESET}"
+        return 1
+    fi
+
+    get_panel_token || return 1
+    local token
+    token=$(cat "$TOKEN_FILE" 2>/dev/null)
+    if [ -z "$token" ]; then
+        echo -e "${COLOR_RED}${LANG[ERROR_TOKEN]}${COLOR_RESET}"
+        return 1
+    fi
+
+    local profiles uuids
+    profiles=$(make_api_request "GET" "http://$domain_url/api/config-profiles" "$token")
+    if ! echo "$profiles" | jq -e '.response.configProfiles' > /dev/null 2>&1; then
+        echo -e "${COLOR_RED}${LANG[MINCLIENTVER_FAILED]}${COLOR_RESET}"
+        return 1
+    fi
+    uuids=$(echo "$profiles" | jq -r '.response.configProfiles[] | .uuid')
+    if [ -z "$uuids" ]; then
+        echo -e "${COLOR_YELLOW}${LANG[MINCLIENTVER_NONE]}${COLOR_RESET}"
+        return 0
+    fi
+
+    local uuid profile current missing preset config body response
+    local patched=0
+    local untouched=0
+    local failed=0
+    local custom=0
+
+    while IFS= read -r uuid; do
+        [ -n "$uuid" ] || continue
+
+        profile=$(make_api_request "GET" "http://$domain_url/api/config-profiles/$uuid" "$token")
+
+        # The contract declares config as unknown, and a panel may hand it back
+        # as a JSON string instead of an object. Normalise once, and treat a jq
+        # failure here as a failure: folding it into "nothing to do" reports a
+        # profile as already correct while it was never even read.
+        if ! current=$(echo "$profile" | jq -e 'if (.response.config | type) == "string" then (.response.config | fromjson) else .response.config end' 2>/dev/null); then
+            failed=$((failed + 1))
+            printf "${COLOR_RED}${LANG[MINCLIENTVER_PROFILE_FAILED]}${COLOR_RESET}\n" "$uuid"
+            continue
+        fi
+
+        if ! missing=$(echo "$current" | jq -e '[.inbounds[]? | select(.streamSettings.security? == "reality") | select((.streamSettings.realitySettings | type) == "object") | select(.streamSettings.realitySettings | has("minClientVer") | not)] | length' 2>/dev/null); then
+            failed=$((failed + 1))
+            printf "${COLOR_RED}${LANG[MINCLIENTVER_PROFILE_FAILED]}${COLOR_RESET}\n" "$uuid"
+            continue
+        fi
+
+        preset=$(echo "$current" | jq '[.inbounds[]? | select(.streamSettings.security? == "reality") | select((.streamSettings.realitySettings.minClientVer? // "0.0.0") != "0.0.0")] | length' 2>/dev/null)
+        [ -n "$preset" ] && [ "$preset" != "0" ] && custom=$((custom + 1))
+
+        if [ "$missing" = "0" ]; then
+            untouched=$((untouched + 1))
+            continue
+        fi
+
+        if ! config=$(echo "$current" | jq -e '.inbounds |= map(if (.streamSettings.security? == "reality") and ((.streamSettings.realitySettings | type) == "object") then (.streamSettings.realitySettings.minClientVer //= "0.0.0") else . end)' 2>/dev/null); then
+            failed=$((failed + 1))
+            printf "${COLOR_RED}${LANG[MINCLIENTVER_PROFILE_FAILED]}${COLOR_RESET}\n" "$uuid"
+            continue
+        fi
+
+        body=$(jq -n --arg uuid "$uuid" --argjson config "$config" '{uuid: $uuid, config: $config}')
+        response=$(make_api_request "PATCH" "http://$domain_url/api/config-profiles" "$token" "$body")
+        if echo "$response" | jq -e '.response.uuid' > /dev/null 2>&1; then
+            patched=$((patched + 1))
+        else
+            failed=$((failed + 1))
+            printf "${COLOR_RED}${LANG[MINCLIENTVER_PROFILE_FAILED]}${COLOR_RESET}\n" "$uuid"
+        fi
+    done <<< "$uuids"
+
+    printf "${COLOR_GREEN}${LANG[MINCLIENTVER_DONE]}${COLOR_RESET}\n" "$patched" "$untouched" "$failed"
+    if [ "$custom" -gt 0 ]; then
+        printf "${COLOR_YELLOW}${LANG[MINCLIENTVER_CUSTOM]}${COLOR_RESET}\n" "$custom"
+    fi
+}
+
+view_logs() {
+    local dirs=()
+    local dir
+    while IFS= read -r dir; do
+        [ -n "$dir" ] && dirs+=("$dir")
+    done < <(managed_compose_dirs)
+
+    if [ ${#dirs[@]} -eq 0 ]; then
+        echo -e "${COLOR_RED}${LANG[DIR_NOT_FOUND]}${COLOR_RESET}"
+        return 1
+    fi
+
+    local target="${dirs[0]}"
+    if [ ${#dirs[@]} -gt 1 ]; then
+        echo -e ""
+        echo -e "${COLOR_YELLOW}${LANG[SELECT_STACK_LOGS]}${COLOR_RESET}"
+        local i=1
+        for dir in "${dirs[@]}"; do
+            echo -e "${COLOR_YELLOW}${i}. ${dir}${COLOR_RESET}"
+            i=$((i + 1))
+        done
+        echo -e ""
+
+        local choice
+        while true; do
+            reading "${LANG[SELECT_STACK_LOGS_PROMPT]}" choice
+            if [[ "$choice" =~ ^[0-9]+$ ]] && [ "$choice" -ge 1 ] && [ "$choice" -le ${#dirs[@]} ]; then
+                break
+            fi
+            echo -e "${COLOR_RED}${LANG[CERT_INVALID_CHOICE]}${COLOR_RESET}"
+        done
+        target="${dirs[$((choice - 1))]}"
+    fi
+
+    cd "$target" || { echo -e "${COLOR_RED}${LANG[CHANGE_DIR_FAILED]} $target${COLOR_RESET}"; return 1; }
+
+    if ! compose_stack_running; then
+        echo -e "${COLOR_RED}${LANG[CONTAINER_NOT_RUNNING]}${COLOR_RESET}"
+        return 1
+    fi
+
+    echo -e "${COLOR_YELLOW}${LANG[VIEW_LOGS]} ($target)${COLOR_RESET}"
+    docker compose logs -f -t
+}
+
+#Manage Panel Access
+show_panel_access() {
+    echo -e ""
+    echo -e "${COLOR_GREEN}${LANG[MENU_9]}${COLOR_RESET}"
+    echo -e ""
+    echo -e "${COLOR_YELLOW}1. ${LANG[PORT_8443_OPEN]}${COLOR_RESET}"
+    echo -e "${COLOR_YELLOW}2. ${LANG[PORT_8443_CLOSE]}${COLOR_RESET}"
+    echo -e ""
+    echo -e "${COLOR_YELLOW}0. ${LANG[EXIT]}${COLOR_RESET}"
+    echo -e ""
+}
+
+manage_panel_access() {
+    show_panel_access
+    reading "${LANG[IPV6_PROMPT]}" ACCESS_OPTION
+    case $ACCESS_OPTION in
+        1)
+            open_panel_access
+            ;;
+        2)
+            close_panel_access
+            ;;
+        0)
+            echo -e "${COLOR_YELLOW}${LANG[EXIT]}${COLOR_RESET}"
+            sleep 2
+            remnawave_reverse
+            ;;
+        *)
+            echo -e "${COLOR_YELLOW}${LANG[IPV6_INVALID_CHOICE]}${COLOR_RESET}"
+            ;;
+    esac
+    sleep 2
+    manage_panel_access
+}
+
+# The emergency door for panel+node boxes: Xray owns 443 there, and when the
+# Reality path misbehaves the panel stays reachable straight over TCP 8443.
+# The normal listeners keep serving while the door is open — nginx gains an
+# extra listen line inside the panel's own server block (so the whole auth
+# chain, cookie gate or tinyauth, guards the port too), caddy gains an extra
+# bind next to its unix socket.
+panel_access_port_busy() {
+    ss -tln 2>/dev/null | awk -v p=":8443" '$4 ~ p"$" { found = 1 } END { exit !found }'
+}
+
+# The real panel domain — the compose carries only the ${PANEL_DOMAIN}
+# placeholder, the value lives in .env.
+panel_access_domain() {
+    local dir="$1" domain=""
+    [ -f "$dir/.env" ] && domain=$(sed -n "s/^PANEL_DOMAIN=//p" "$dir/.env" | head -n1 | tr -d '"'"'"'')
+    if [ -z "$domain" ]; then
+        domain=$(grep "PANEL_DOMAIN=" "$dir/docker-compose.yml" 2>/dev/null | head -n 1 | sed 's/.*PANEL_DOMAIN=//; s/[[:space:]]*$//')
+    fi
+    [ -n "$domain" ] && [ "$domain" != '${PANEL_DOMAIN}' ] || return 1
+    echo "$domain"
+}
+
+# Validate the edited nginx config inside the running container. A live
+# master already holds the unix socket, so its EADDRINUSE in `nginx -t` is
+# the config being checked against ourselves — every other failure is real.
+panel_access_nginx_validate() {
+    local dir="$1" test_out test_rc=0
+    if ! docker ps --format '{{.Names}}' | grep -qx remnawave-nginx; then
+        (cd "$dir" && docker compose up -d remnawave-nginx) >/dev/null 2>&1
+    fi
+    test_out=$(docker exec remnawave-nginx nginx -t 2>&1) || test_rc=$?
+    if [ "$test_rc" -ne 0 ]; then
+        if ! printf '%s' "$test_out" | grep -q "unix:/dev/shm/nginx.sock" \
+            || ! printf '%s' "$test_out" | grep -q "Address already in use"; then
+            printf '%s\n' "$test_out" | tail -n 3 | sed 's/^/  /'
+            return 1
+        fi
+    fi
+    return 0
+}
+
+# Single-file bind mounts follow the inode: sed -i swaps the file behind
+# the container's back (temp file + rename), and the running nginx keeps
+# reading the old bytes through its mount — the edit "succeeds" while
+# nothing changes. Rewriting in place (cat >) keeps the inode, so the
+# reload genuinely picks the new config up.
+panel_access_write() { # target tmp
+    local target="$1" tmp="$2"
+    cat "$tmp" > "$target"
+    rm -f "$tmp"
+}
+
+panel_access_apply_nginx() {
+    local dir="$1" conf="$dir/nginx.conf" tmp="${1}/nginx.conf.8443tmp"
+    cp -p "$conf" "${conf}.8443bak"
+
+    # A stale listen from a previous run goes first, ours lands right after
+    # the panel's server_name — inside the same server block.
+    sed '\|^[[:space:]]*listen 8443 ssl;$|d' "$conf" > "$tmp"
+    sed -i "/server_name ${PANEL_DOMAIN};/a \    listen 8443 ssl;" "$tmp"
+    panel_access_write "$conf" "$tmp"
+
+    if ! panel_access_nginx_validate "$dir"; then
+        cat "${conf}.8443bak" > "$conf"
+        docker exec remnawave-nginx nginx -s reload >/dev/null 2>&1
+        rm -f "${conf}.8443bak"
+        echo -e "${COLOR_RED}${LANG[PORT_8443_REJECTED]}${COLOR_RESET}"
+        return 1
+    fi
+
+    (cd "$dir" && docker compose up -d remnawave-nginx) >/dev/null 2>&1
+    docker exec remnawave-nginx nginx -s reload >/dev/null 2>&1
+    rm -f "${conf}.8443bak"
+    return 0
+}
+
+# The caddy door reuses the panel site itself: the address moves to :8443
+# and a TCP bind joins the unix one, so the site keeps answering on the
+# socket (the normal path through Xray) while also listening on 8443.
+# Caddy has no reload without its admin API (disabled here), so the door
+# costs one restart — it re-resolves the bind mount, in-place writes or
+# not.
+panel_access_apply_caddy() {
+    local dir="$1" caddyfile="$dir/Caddyfile" tmp="${1}/Caddyfile.8443tmp"
+    cp -p "$caddyfile" "${caddyfile}.8443bak"
+
+    sed "s|https://{\$PANEL_DOMAIN} {|https://{\$PANEL_DOMAIN}:8443 {|" "$caddyfile" > "$tmp"
+    sed -i "/https:\/\/{\$PANEL_DOMAIN}:8443 {/,/^}/ { /^    bind unix/{ a\    bind 0.0.0.0
+}; }" "$tmp"
+    panel_access_write "$caddyfile" "$tmp"
+
+    docker restart remnawave-caddy >/dev/null 2>&1
+    # A config caddy rejects dies a few seconds into its restart loop — an
+    # immediate check would pass right before that.
+    sleep 6
+    if ! docker ps --format '{{.Names}}' | grep -qx remnawave-caddy; then
+        cat "${caddyfile}.8443bak" > "$caddyfile"
+        docker restart remnawave-caddy >/dev/null 2>&1
+        rm -f "${caddyfile}.8443bak"
+        echo -e "${COLOR_RED}${LANG[PORT_8443_REJECTED]}${COLOR_RESET}"
+        return 1
+    fi
+    rm -f "${caddyfile}.8443bak"
+    return 0
+}
+
+open_panel_access() {
+    local dir=""
+    if [ -d "/opt/remnawave" ]; then
+        dir="/opt/remnawave"
+    elif [ -d "/opt/remnanode" ]; then
+        dir="/opt/remnanode"
+    else
+        echo -e "${COLOR_RED}${LANG[DIR_NOT_FOUND]}${COLOR_RESET}"
+        return 1
+    fi
+
+    local webserver=""
+    if [ -f "$dir/nginx.conf" ]; then
+        webserver="nginx"
+    elif [ -f "$dir/Caddyfile" ]; then
+        webserver="caddy"
+    else
+        echo -e "${COLOR_RED}${LANG[CONFIG_NOT_FOUND]}${COLOR_RESET}"
+        return 1
+    fi
+
+    if ! PANEL_DOMAIN=$(panel_access_domain "$dir"); then
+        echo -e "${COLOR_RED}${LANG[NGINX_CONF_ERROR]}${COLOR_RESET}"
+        return 1
+    fi
+
+    if command -v ss >/dev/null 2>&1 && panel_access_port_busy; then
+        echo -e "${COLOR_RED}${LANG[PORT_8443_IN_USE]}${COLOR_RESET}"
+        return 1
+    fi
+
+    if [ "$webserver" = "nginx" ]; then
+        if grep -q "listen 8443 ssl;" "$dir/nginx.conf"; then
+            echo -e "${COLOR_YELLOW}${LANG[PORT_8443_ALREADY_CONFIGURED]}${COLOR_RESET}"
+        else
+            panel_access_apply_nginx "$dir" || return 1
+        fi
+    else
+        if grep -q "https://{\$PANEL_DOMAIN}:8443 {" "$dir/Caddyfile"; then
+            echo -e "${COLOR_YELLOW}${LANG[PORT_8443_ALREADY_CONFIGURED]}${COLOR_RESET}"
+        else
+            panel_access_apply_caddy "$dir" || return 1
+        fi
+    fi
+
+    ufw allow 8443/tcp >/dev/null 2>&1
+    ufw reload >/dev/null 2>&1
+
+    # The link follows the auth mode: with a portal (tinyauth or caddy
+    # security) the plain address is enough — the portal takes it from
+    # there; the cookie gate needs its magic pair in the query string.
+    local auth_mode="cookie" panel_link cookie_pair=""
+    if [ "$webserver" = "nginx" ]; then
+        if grep -q "auth_request /tinyauth_check" "$dir/nginx.conf"; then
+            auth_mode="tinyauth"
+        else
+            local cookie_line c1 c2
+            cookie_line=$(grep -A 2 "map \$http_cookie \$auth_cookie" "$dir/nginx.conf" | grep "~*\w\+.*=" | head -n1)
+            c1=$(echo "$cookie_line" | grep -oP '~*\K\w+(?==)')
+            c2=$(echo "$cookie_line" | grep -oP '=\K\w+(?=")')
+            [ -n "$c1" ] && [ -n "$c2" ] && cookie_pair="${c1}=${c2}"
+        fi
+    else
+        if grep -q "authentication portal" "$dir/Caddyfile"; then
+            auth_mode="portal"
+        else
+            local cookie_line c1 c2
+            cookie_line=$(grep 'header +Set-Cookie' "$dir/Caddyfile" | head -n 1)
+            c1=$(echo "$cookie_line" | grep -oP 'Set-Cookie "\K[^=]+')
+            c2=$(echo "$cookie_line" | grep -oP 'Set-Cookie "[^=]+=\K[^;]+')
+            [ -n "$c1" ] && [ -n "$c2" ] && cookie_pair="${c1}=${c2}"
+        fi
+    fi
+
+    if [ "$auth_mode" != "cookie" ]; then
+        panel_link="https://${PANEL_DOMAIN}:8443"
+    elif [ -n "$cookie_pair" ]; then
+        panel_link="https://${PANEL_DOMAIN}:8443/auth/login?${cookie_pair}"
+    else
+        panel_link="https://${PANEL_DOMAIN}:8443"
+    fi
+
+    echo -e "${COLOR_YELLOW}${LANG[OPEN_PANEL_LINK]}${COLOR_RESET}"
+    echo -e "${COLOR_WHITE}${panel_link}${COLOR_RESET}"
+    if [ "$auth_mode" != "cookie" ]; then
+        echo -e "${COLOR_GRAY}${LANG[PORT_8443_PORTAL_NOTE]}${COLOR_RESET}"
+    fi
+    echo -e "${COLOR_RED}${LANG[PORT_8443_WARNING]}${COLOR_RESET}"
+    return 0
+}
+
+close_panel_access() {
+    local dir=""
+    if [ -d "/opt/remnawave" ]; then
+        dir="/opt/remnawave"
+    elif [ -d "/opt/remnanode" ]; then
+        dir="/opt/remnanode"
+    else
+        echo -e "${COLOR_RED}${LANG[DIR_NOT_FOUND]}${COLOR_RESET}"
+        return 1
+    fi
+
+    echo -e "${COLOR_YELLOW}${LANG[PORT_8443_CLOSE]}${COLOR_RESET}"
+
+    local webserver=""
+    if [ -f "$dir/nginx.conf" ]; then
+        webserver="nginx"
+    elif [ -f "$dir/Caddyfile" ]; then
+        webserver="caddy"
+    else
+        echo -e "${COLOR_RED}${LANG[CONFIG_NOT_FOUND]}${COLOR_RESET}"
+        return 1
+    fi
+
+    if [ "$webserver" = "nginx" ]; then
+        if grep -q "listen 8443 ssl;" "$dir/nginx.conf"; then
+            local conf="$dir/nginx.conf" tmp="$dir/nginx.conf.8443tmp"
+            cp -p "$conf" "${conf}.8443bak"
+            sed '\|^[[:space:]]*listen 8443 ssl;$|d' "$conf" > "$tmp"
+            panel_access_write "$conf" "$tmp"
+            if ! panel_access_nginx_validate "$dir"; then
+                cat "${conf}.8443bak" > "$conf"
+                docker exec remnawave-nginx nginx -s reload >/dev/null 2>&1
+                rm -f "${conf}.8443bak"
+                echo -e "${COLOR_RED}${LANG[PORT_8443_REJECTED]}${COLOR_RESET}"
+                return 1
+            fi
+            (cd "$dir" && docker compose up -d remnawave-nginx) >/dev/null 2>&1
+            docker exec remnawave-nginx nginx -s reload >/dev/null 2>&1
+            rm -f "${conf}.8443bak"
+        else
+            echo -e "${COLOR_YELLOW}${LANG[PORT_8443_NOT_CONFIGURED]}${COLOR_RESET}"
+        fi
+    else
+        if grep -q "https://{\$PANEL_DOMAIN}:8443 {" "$dir/Caddyfile"; then
+            local caddyfile="$dir/Caddyfile" tmp="$dir/Caddyfile.8443tmp"
+            cp -p "$caddyfile" "${caddyfile}.8443bak"
+            sed "s|https://{\$PANEL_DOMAIN}:8443 {|https://{\$PANEL_DOMAIN} {|" "$caddyfile" > "$tmp"
+            # Only the TCP bind added with the door goes — the http->https
+            # redirect block carries a bind 0.0.0.0 of its own.
+            sed -i "/https:\/\/{\$PANEL_DOMAIN} {/,/^}/ { /^    bind 0.0.0.0$/d }" "$tmp"
+            panel_access_write "$caddyfile" "$tmp"
+            docker restart remnawave-caddy >/dev/null 2>&1
+            sleep 6
+            if ! docker ps --format '{{.Names}}' | grep -qx remnawave-caddy; then
+                cat "${caddyfile}.8443bak" > "$caddyfile"
+                docker restart remnawave-caddy >/dev/null 2>&1
+                rm -f "${caddyfile}.8443bak"
+                echo -e "${COLOR_RED}${LANG[PORT_8443_REJECTED]}${COLOR_RESET}"
+                return 1
+            fi
+            rm -f "${caddyfile}.8443bak"
+        else
+            echo -e "${COLOR_YELLOW}${LANG[PORT_8443_NOT_CONFIGURED]}${COLOR_RESET}"
+        fi
+    fi
+
+    if ufw status 2>/dev/null | grep -q "8443"; then
+        ufw delete allow 8443/tcp >/dev/null 2>&1
+        ufw reload >/dev/null 2>&1
+        if [ $? -ne 0 ]; then
+            echo -e "${COLOR_RED}${LANG[UFW_RELOAD_FAILED]}${COLOR_RESET}"
+            return 1
+        fi
+        echo -e "${COLOR_GREEN}${LANG[PORT_8443_CLOSED]}${COLOR_RESET}"
+    else
+        echo -e "${COLOR_YELLOW}${LANG[PORT_8443_ALREADY_CLOSED]}${COLOR_RESET}"
+    fi
+    return 0
+}
